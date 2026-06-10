@@ -1,0 +1,412 @@
+name: 🏗️ DONGZAI 固件编译(显示内核) - 支持快速/完全重编译
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: '📦 目标设备'
+        required: true
+        default: 'wh3000pro'
+        type: choice
+        options:
+          - wh3000        # 华硅 WH3000       · MT7981 ARM · 512MB
+          - wh3000pro     # 华硅 WH3000 Pro   · MT7981 ARM · 512MB
+          - re-sp-01b     # 京东云无线宝       · MT7621 MIPS · 512MB
+      build_mode:
+        description: '⚡ 编译模式'
+        required: true
+        default: 'fast'
+        type: choice
+        options:
+          - fast          # 快速增量编译（利用缓存，推荐日常使用）
+          - clean         # 完全重新编译（清理所有缓存，解决编译异常时使用）
+
+env:
+  LEDE_REPO:   https://github.com/coolsnowwolf/lede
+  LEDE_BRANCH: master
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+
+      - name: 🎯 DONGZAI 固件工厂
+        run: |
+          cat << 'EOF'
+
+            ____   ___  _   _  ____ _____    _    ___
+           |  _ \ / _ \| \ | |/ ___|__  /  / \  |_ _|
+           | | | | | | |  \| | |  _ / /  / _ \  | |
+           | |_| | |_| | |\  | |_| |/ /__/ ___ \ | |
+           |____/ \___/|_| \_|\____/____/_/   \_\___|
+                  🏗️  固件工厂  ·  OpenWrt / LEDE
+
+          EOF
+
+          DEVICE="${{ github.event.inputs.device }}"
+          BUILD_MODE="${{ github.event.inputs.build_mode }}"
+          case "$DEVICE" in
+            wh3000)
+              DNAME="华硅 WH3000"
+              DSPEC="MT7981 ARM · 512MB RAM · eMMC"
+              ;;
+            wh3000pro)
+              DNAME="华硅 WH3000 Pro"
+              DSPEC="MT7981 ARM · 512MB RAM · eMMC"
+              ;;
+            re-sp-01b)
+              DNAME="京东云无线宝 RE-SP-01B"
+              DSPEC="MT7621 MIPS · 512MB RAM · 128GB eMMC"
+              ;;
+          esac
+
+          echo "  ┌─────────────────────────────────────────┐"
+          echo "  │  📦 设备：$DNAME"
+          echo "  │  🔧 规格：$DSPEC"
+          echo "  │  ⚡ 模式：$BUILD_MODE"
+          echo "  │  🕐 时间：$(date '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "  │  🔖 标识：DONGZAI"
+          echo "  └─────────────────────────────────────────┘"
+
+      - name: 📥 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 🧹 释放磁盘空间
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc \
+                      /usr/local/lib/android \
+                      /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -a -f
+          sudo apt-get clean
+          sudo swapoff -a || true
+          sudo rm -f /swapfile
+          echo "── 当前磁盘空间 ──"
+          df -h
+
+      - name: ⚙️ 初始化编译环境
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            build-essential clang flex bison \
+            g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses5-dev libssl-dev \
+            python3 python3-pyelftools rsync unzip \
+            zlib1g-dev file wget curl ccache cmake \
+            ninja-build jq rename libelf-dev \
+            device-tree-compiler
+
+      # ======================= 完全重新编译时，清理缓存 =======================
+      - name: 🧹 完全重新编译模式 - 清理所有缓存
+        if: github.event.inputs.build_mode == 'clean'
+        run: |
+          echo "⚠️ 完全重新编译模式：将清理所有缓存目录"
+          # 清理可能存在的旧编译目录
+          sudo rm -rf openwrt/build_dir openwrt/staging_dir openwrt/tmp openwrt/dl openwrt/feeds
+          sudo rm -rf ~/.ccache
+          echo "✅ 缓存已清理，将进行全新编译"
+
+      - name: 💾 缓存 key 准备（生成 hash）
+        id: cache_hash
+        run: |
+          # 生成设备配置文件的 hash（.config 文件）
+          CONFIG_HASH=$(sha256sum "${{ github.event.inputs.device }}.config" | cut -d' ' -f1)
+          # 生成自定义脚本的 hash（diy-part1.sh, diy-part2.sh, 以及 files/ 目录）
+          DIY_HASH=$(find . -maxdepth 2 -type f \( -name "diy-part*.sh" -o -name "files" -type d \) -exec sha256sum {} \; 2>/dev/null | sort -k2 | sha256sum | cut -d' ' -f1)
+          echo "config_hash=$CONFIG_HASH" >> $GITHUB_OUTPUT
+          echo "diy_hash=$DIY_HASH" >> $GITHUB_OUTPUT
+
+      # 快速模式才恢复 ccache 缓存，完全重编译模式下跳过恢复（因为上面已清理）
+      - name: ♻️ 恢复 ccache 缓存
+        if: github.event.inputs.build_mode == 'fast'
+        id: ccache_cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.os }}-${{ steps.cache_hash.outputs.config_hash }}-${{ steps.cache_hash.outputs.diy_hash }}
+          restore-keys: |
+            ccache-${{ runner.os }}-
+
+      - name: 📦 克隆 LEDE 源码
+        run: |
+          git clone --depth=1 -b $LEDE_BRANCH $LEDE_REPO openwrt
+          echo "── LEDE 最新提交 ──"
+          git -C openwrt log --oneline -3
+          echo "LEDE_COMMIT=$(git -C openwrt rev-parse HEAD)" >> $GITHUB_ENV
+
+      - name: 🔧 DIY Part 1 - 配置 Feeds
+        run: |
+          chmod +x diy-part1.sh
+          cd openwrt
+          ../diy-part1.sh
+
+      # 快速模式才恢复 feeds 缓存
+      - name: ♻️ 恢复 feeds 缓存
+        if: github.event.inputs.build_mode == 'fast'
+        id: feeds_cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            openwrt/feeds
+            openwrt/package/feeds
+          key: feeds-${{ runner.os }}-${{ env.LEDE_COMMIT }}-${{ steps.cache_hash.outputs.config_hash }}
+          restore-keys: |
+            feeds-${{ runner.os }}-${{ env.LEDE_COMMIT }}-
+            feeds-${{ runner.os }}-
+
+      - name: 🔄 更新 & 安装 Feeds
+        if: github.event.inputs.build_mode == 'fast' && steps.feeds_cache.outputs.cache-hit != 'true'
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+      
+      # 完全重编译模式下，每次都重新更新 feeds
+      - name: 🔄 更新 & 安装 Feeds（完全重编译模式）
+        if: github.event.inputs.build_mode == 'clean'
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 🎛️ 加载设备配置
+        run: |
+          DEVICE="${{ github.event.inputs.device }}"
+          echo "── 加载配置：${DEVICE}.config ──"
+
+          case "$DEVICE" in
+            wh3000)    cp wh3000.config    openwrt/.config ;;
+            wh3000pro) cp wh3000pro.config openwrt/.config ;;
+            re-sp-01b) cp re-sp-01b.config openwrt/.config ;;
+          esac
+
+          if [ "$DEVICE" = "re-sp-01b" ]; then
+            grep -v "CONFIG_TARGET_.*_DEVICE_" openwrt/.config > /tmp/.config_patched
+            echo "CONFIG_TARGET_ramips_mt7621_DEVICE_jdcloud_re-sp-01b=y" >> /tmp/.config_patched
+            cp /tmp/.config_patched openwrt/.config
+            echo "✅ RE-SP-01B 设备目标已修正"
+          else
+            echo "✅ ${DEVICE}：直接使用 config 文件中的设备配置"
+          fi
+
+          echo "── 当前设备目标 ──"
+          grep "DEVICE_" openwrt/.config | grep -v "^#" || true
+
+      - name: 🐧 配置内核版本
+        run: |
+          DEVICE="${{ github.event.inputs.device }}"
+          case "$DEVICE" in
+            wh3000|wh3000pro)
+              printf 'CONFIG_TESTING_KERNEL=y\n' >> openwrt/.config
+              echo "✅ Filogic ARM：已启用最新测试内核（LEDE 自动选择）"
+              ;;
+            re-sp-01b)
+              sed -i '/CONFIG_TESTING_KERNEL/d' openwrt/.config
+              sed -i '/CONFIG_LINUX_6_6/d'      openwrt/.config
+              printf '# CONFIG_TESTING_KERNEL is not set\n' >> openwrt/.config
+              echo "⏭️ MT7621 MIPS：使用稳定内核（5.x）"
+              ;;
+          esac
+
+      - name: 🔧 DIY Part 2 - 文件定制
+        run: |
+          chmod +x diy-part2.sh
+          cd openwrt
+          export DEVICE="${{ github.event.inputs.device }}"
+          ../diy-part2.sh
+
+      - name: 📋 生成最终配置
+        run: |
+          cd openwrt
+          make defconfig
+          echo "── TARGET 配置 ──"
+          grep "CONFIG_TARGET_" .config | head -10
+          echo "── 内核版本 ──"
+          grep -E "LINUX_6|LINUX_5|TESTING_KERNEL" .config | head -5 || true
+
+      # 快速模式才恢复 dl 缓存
+      - name: ♻️ 恢复 dl 缓存
+        if: github.event.inputs.build_mode == 'fast'
+        id: dl_cache
+        uses: actions/cache@v4
+        with:
+          path: openwrt/dl
+          key: dl-${{ runner.os }}-${{ env.LEDE_COMMIT }}
+          restore-keys: |
+            dl-${{ runner.os }}-
+
+      # 快速模式才恢复编译目录缓存
+      - name: ♻️ 恢复编译目录（build_dir / staging_dir）
+        if: github.event.inputs.build_mode == 'fast'
+        id: build_cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            openwrt/build_dir
+            openwrt/staging_dir
+            openwrt/tmp
+          key: build-${{ runner.os }}-${{ env.LEDE_COMMIT }}-${{ steps.cache_hash.outputs.config_hash }}-${{ steps.cache_hash.outputs.diy_hash }}
+          restore-keys: |
+            build-${{ runner.os }}-${{ env.LEDE_COMMIT }}-${{ steps.cache_hash.outputs.config_hash }}-
+            build-${{ runner.os }}-${{ env.LEDE_COMMIT }}-
+            build-${{ runner.os }}-
+
+      - name: ⬇️ 下载编译依赖
+        run: |
+          cd openwrt
+          make download -j8
+          find dl -size -1024c -exec ls -l {} \; 2>/dev/null || true
+
+      - name: 🔨 编译固件
+        run: |
+          cd openwrt
+          echo "── 开始编译，CPU 核心：$(nproc) ──"
+          echo "── 编译模式：${{ github.event.inputs.build_mode }} ──"
+          
+          export PATH="/usr/lib/ccache:$PATH"
+          export CCACHE_DIR=~/.ccache
+          
+          # 显示 ccache 统计（仅在快速模式，清理模式下 ccache 可能为空）
+          if [ "${{ github.event.inputs.build_mode }}" = "fast" ]; then
+            ccache -s
+          fi
+
+          # 完全重编译模式：先执行 make clean
+          if [ "${{ github.event.inputs.build_mode }}" = "clean" ]; then
+            echo "🧹 完全重编译模式：执行 make clean..."
+            make clean
+          fi
+
+          make -j$(nproc) V=s 2>&1 | tee /tmp/build.log | grep -E "^make\[[0-9]+\]|ERROR:|error:" || true
+
+          if [ ${PIPESTATUS[0]} -ne 0 ]; then
+            echo "⚠️ 并行编译失败，单线程重试..."
+            make -j1 V=s 2>&1 | tail -150
+            exit 1
+          fi
+
+          echo "✅ 编译完成"
+          
+          if [ "${{ github.event.inputs.build_mode }}" = "fast" ]; then
+            ccache -s
+          fi
+
+      # ======================= 保存缓存（仅在快速模式下） =======================
+      - name: 💾 保存 ccache 缓存
+        if: github.event.inputs.build_mode == 'fast'
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.os }}-${{ steps.cache_hash.outputs.config_hash }}-${{ steps.cache_hash.outputs.diy_hash }}
+
+      - name: 💾 保存 dl 缓存
+        if: github.event.inputs.build_mode == 'fast'
+        uses: actions/cache@v4
+        with:
+          path: openwrt/dl
+          key: dl-${{ runner.os }}-${{ env.LEDE_COMMIT }}
+
+      - name: 💾 保存编译目录缓存
+        if: github.event.inputs.build_mode == 'fast'
+        uses: actions/cache@v4
+        with:
+          path: |
+            openwrt/build_dir
+            openwrt/staging_dir
+            openwrt/tmp
+          key: build-${{ runner.os }}-${{ env.LEDE_COMMIT }}-${{ steps.cache_hash.outputs.config_hash }}-${{ steps.cache_hash.outputs.diy_hash }}
+
+      # ======================= 后续步骤（整理、上传、发布）保持不变 =======================
+      - name: 🔍 获取完整内核版本
+        id: kernel
+        run: |
+          cd openwrt
+          KERNEL=$(make kernelversion 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+          if [ -z "$KERNEL" ]; then
+            KERNEL=$(find build_dir -type d -name "linux-*" 2>/dev/null | sed 's#^.*/linux-##' | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -1)
+          fi
+          if [ -z "$KERNEL" ]; then
+            MAJOR_MINOR=$(grep "^CONFIG_LINUX_[0-9_]*=y" .config | head -1 | sed 's/CONFIG_LINUX_//' | sed 's/=y//' | tr '_' '.')
+            [ -n "$MAJOR_MINOR" ] && KERNEL="${MAJOR_MINOR}.*" || KERNEL="Unknown"
+          fi
+          COMMIT=$(git rev-parse --short HEAD)
+          BUILD_TIME=$(date '+%Y-%m-%d %H:%M UTC')
+          echo "kernel=$KERNEL" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "build_time=$BUILD_TIME" >> "$GITHUB_OUTPUT"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "完整内核版本 : $KERNEL"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━"
+
+      - name: 📁 整理固件
+        id: organize
+        run: |
+          mkdir -p upload
+          find openwrt/bin/targets/ -type f \( -name "*.bin" -o -name "*.img.gz" -o -name "*.itb" -o -name "*.tar" \) -exec cp {} upload/ \;
+          cd upload
+          for f in *; do
+            newname=$(echo "$f" | sed 's/openwrt/DONGZAI/g; s/lede/DONGZAI/g')
+            [ "$f" != "$newname" ] && mv "$f" "$newname"
+          done
+          ls -lh
+          if [ -z "$(ls -A .)" ]; then
+            echo "⚠️ 警告：未找到固件文件"
+            exit 1
+          fi
+          echo "✅ 固件整理完成，共 $(ls | wc -l) 个文件"
+
+      - name: 📤 上传 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DONGZAI_${{ github.event.inputs.device }}_K${{ steps.kernel.outputs.kernel }}_${{ github.run_number }}
+          path: upload/
+          retention-days: 30
+
+      - name: 🏷️ 生成 Release 标签
+        id: tag
+        run: |
+          DEVICE="${{ github.event.inputs.device }}"
+          DATE=$(date +'%Y-%m-%d')
+          TIME=$(date +'%H%M')
+          KERNEL="${{ steps.kernel.outputs.kernel }}"
+          TAG="DONGZAI-${DEVICE^^}-K${KERNEL}-$(date +'%Y.%m.%d')-${TIME}"
+          echo "release_tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "release_date=$DATE" >> "$GITHUB_OUTPUT"
+          echo "生成 Tag：$TAG"
+
+      - name: 🚀 发布到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          name: "🏗️ DONGZAI · ${{ github.event.inputs.device }} · Linux ${{ steps.kernel.outputs.kernel }}"
+          files: upload/*
+          body: |
+            ## 🏗️ DONGZAI 固件工厂
+
+            | 项目 | 内容 |
+            |---|---|
+            | 📦 设备 | ${{ github.event.inputs.device }} |
+            | 🐧 Linux 内核 | ${{ steps.kernel.outputs.kernel }} |
+            | 🔖 LEDE Commit | ${{ steps.kernel.outputs.commit }} |
+            | 🕐 编译时间 | ${{ steps.kernel.outputs.build_time }} |
+            | 📅 编译日期 | ${{ steps.tag.outputs.release_date }} |
+            | 🔖 标识 | DONGZAI |
+            | ⚡ 编译模式 | ${{ github.event.inputs.build_mode }} |
+
+            ### 固件文件说明
+            | 文件 | 用途 |
+            |---|---|
+            | `*-initramfs-kernel.bin` | 首次刷机 / TFTP 恢复 |
+            | `*-squashfs-sysupgrade.bin` | ✅ 日常升级固件（推荐） |
+
+            ### 刷机注意
+            - 首次刷入请先备份原厂固件
+            - 建议使用 `sysupgrade` 命令升级，勿勾选保留配置
+
+            ---
+            🤖 由 GitHub Actions 自动编译 · DONGZAI 固件工厂
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
