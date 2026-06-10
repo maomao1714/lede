@@ -187,18 +187,42 @@ jobs:
           echo "✅ 编译完成"
 
       # ─────────────────────────────────────────────────────────
-      # 获取完整内核版本（必须放在编译之后，此时内核源码已准备好）
+      # 🔍 获取完整内核版本（多策略）
       - name: 🔍 获取完整内核版本
         id: kernel
         run: |
           cd openwrt
-          # 使用 make kernelversion 获取完整版本号，例如 6.6.139 或 5.10.226
-          KERNEL=$(make kernelversion 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "Unknown")
+
+          # 策略1：使用 make kernelversion（最可靠）
+          KERNEL=$(make kernelversion 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+
+          # 策略2：若失败，搜索 build_dir 中的内核目录名
+          if [ -z "$KERNEL" ]; then
+            echo "⚠️ make kernelversion 未获取到版本，尝试从 build_dir 搜索..."
+            KERNEL=$(find build_dir -type d -name "linux-*" 2>/dev/null \
+              | sed 's#^.*/linux-##' \
+              | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' \
+              | sort -V | tail -1)
+          fi
+
+          # 策略3：若依然失败，从 .config 读取大版本号并追加 * 标记
+          if [ -z "$KERNEL" ]; then
+            echo "⚠️ 未找到完整版本，从 .config 获取大版本..."
+            MAJOR_MINOR=$(grep "^CONFIG_LINUX_[0-9_]*=y" .config | head -1 | sed 's/CONFIG_LINUX_//' | sed 's/=y//' | tr '_' '.')
+            if [ -n "$MAJOR_MINOR" ]; then
+              KERNEL="${MAJOR_MINOR}.*"
+            else
+              KERNEL="Unknown"
+            fi
+          fi
+
           COMMIT=$(git rev-parse --short HEAD)
           BUILD_TIME=$(date '+%Y-%m-%d %H:%M UTC')
-          echo "kernel=$KERNEL" >> $GITHUB_OUTPUT
-          echo "commit=$COMMIT" >> $GITHUB_OUTPUT
-          echo "build_time=$BUILD_TIME" >> $GITHUB_OUTPUT
+
+          echo "kernel=$KERNEL" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "build_time=$BUILD_TIME" >> "$GITHUB_OUTPUT"
+
           echo "━━━━━━━━━━━━━━━━━━━━━━━"
           echo "完整内核版本 : $KERNEL"
           echo "LEDE Commit  : $COMMIT"
@@ -210,10 +234,12 @@ jobs:
         run: |
           mkdir -p upload
 
+          # 修复：移除 find 中的乱码字符，正确使用 -o
           find openwrt/bin/targets/ -type f \( -name "*.bin" -o -name "*.img.gz" -o -name "*.itb" -o -name "*.tar" \) -exec cp {} upload/ \;
 
           cd upload
 
+          # 统一重命名 openwrt/lede → DONGZAI
           for f in *; do
             newname=$(echo "$f" | sed 's/openwrt/DONGZAI/g; s/lede/DONGZAI/g')
             [ "$f" != "$newname" ] && mv "$f" "$newname"
