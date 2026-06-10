@@ -256,7 +256,7 @@ jobs:
       - name: 📤 上传 Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DONGZAI_${{ github.event.inputs.device }}_${{ github.run_number }}
+          name: DONGZAI_${{ github.event.inputs.device }}K${{ steps.kernel.outputs.kernel }}${{ github.run_number }}
           path: upload/
           retention-days: 7
 
