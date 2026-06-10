@@ -280,16 +280,18 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.release_tag }}
-          name: "🏗️ DONGZAI · ${{ github.event.inputs.device }} · ${{ steps.tag.outputs.release_date }}"
+          name: "🏗️ DONGZAI · ${{ github.event.inputs.device }} · Linux ${{ steps.kernel.outputs.kernel }}"
           files: upload/*
           body: |
             ## 🏗️ DONGZAI 固件工厂
 
             | 项目 | 内容 |
             |---|---|
-            | 📦 设备 | `${{ github.event.inputs.device }}` |
-            | 🐧 内核 | 最新测试内核（Filogic ARM）/ 稳定 5.x（MT7621 MIPS） |
-            | 📅 编译日期 | ${{ steps.tag.outputs.release_date }} |
+            | | 📦 设备 | "${{ github.event.inputs.device }}" |
+            | 🐧 Linux 内核 | "${{ steps.kernel.outputs.kernel }}" |
+            | 🔖 LEDE Commit | "${{ steps.kernel.outputs.commit }}" |
+            | 🕐 编译时间 | "${{ steps.kernel.outputs.build_time }}" |
+            | 📅 编译日期 | "${{ steps.tag.outputs.release_date }}" |
             | 🔖 标识 | DONGZAI |
 
             ### 固件文件说明
